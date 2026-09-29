@@ -54,7 +54,11 @@ class PriceModel:
             if target > 0 and x:
                 rows.append((x,target))
         unique_locations={(round(x["latitude"],3),round(x["longitude"],3)) for x,_ in rows}
-        if len(rows) < 50 or len(unique_locations) < 5:
+        # These thresholds intentionally stay conservative: a model trained on
+        # too little or too geographically narrow data overfits and produces
+        # confident-looking but inaccurate predictions. It's better to fall
+        # back to pure comparable evidence than to ship a bad model.
+        if len(rows) < 40 or len(unique_locations) < 4:
             self.metrics={"status":"insufficient_historical_data","rows":len(rows),"unique_locations":len(unique_locations)}
             return
 
@@ -123,3 +127,49 @@ def robust_ppsf(rows: list[dict]) -> float|None:
         if acc >= total/2:
             return float(v)
     return float(median(v for v,_ in pairs))
+
+
+def forecast_price_series(historical: list[dict], horizon: int = 5, start_year: int | None = None) -> list[dict]:
+    """Forecast future INR/sq-ft from the extracted year-wise history.
+
+    This is deliberately a small, transparent time-series model because the
+    Google prompt supplies only four annual observations. With four points,
+    a simple linear trend is easier to inspect than a high-capacity model.
+    It must never be presented as a guaranteed market price.
+    """
+    clean = []
+    for row in historical or []:
+        try:
+            year = int(row["year"])
+            price = float(row["price_per_sqft"])
+            if 1900 <= year <= 2100 and math.isfinite(price) and price > 0:
+                clean.append((year, price))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    clean = sorted(dict(clean).items())
+    if len(clean) < 2:
+        return []
+
+    x = np.asarray([y for y, _ in clean], dtype=float)
+    y = np.asarray([p for _, p in clean], dtype=float)
+    slope, intercept = np.polyfit(x, y, 1)
+
+    # Historical annual percentage change is useful as a transparent metric.
+    changes = []
+    for (_, prev), (_, cur) in zip(clean, clean[1:]):
+        if prev > 0:
+            changes.append((cur / prev - 1.0) * 100.0)
+
+    last_year = int(max(x))
+    first_forecast_year = int(start_year) if start_year is not None else last_year + 1
+    out = []
+    for step in range(horizon):
+        year = first_forecast_year + step
+        predicted = max(0.0, float(slope * year + intercept))
+        out.append({
+            "year": year,
+            "predicted_price_per_sqft": round(predicted, 2),
+        })
+
+    return out

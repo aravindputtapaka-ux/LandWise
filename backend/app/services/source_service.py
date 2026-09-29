@@ -1,12 +1,7 @@
 import asyncio
 import os
-from datetime import datetime
 from urllib.parse import urlparse
 
-from app.services.forecast_service import (
-    extract_year_price_pairs,
-    parse_historical_text,
-)
 import httpx
 from bs4 import BeautifulSoup
 
@@ -61,9 +56,7 @@ async def _post(
                 url,
                 json=payload,
                 headers={
-                    "Authorization": f"Bearer {_key().strip()}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "LandWiseAI/2.0",
+                    "User-Agent": "LandWiseAI/2.0"
                 },
             )
 
@@ -71,13 +64,14 @@ async def _post(
 
             return response.json()
 
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:1200] if exc.response is not None else str(exc)
+    except (
+        httpx.HTTPError,
+        ValueError,
+    ) as exc:
+
         raise SourceServiceError(
-            f"Tavily request failed ({exc.response.status_code}): {detail}"
+            f"Tavily request failed: {exc}"
         )
-    except (httpx.HTTPError, ValueError) as exc:
-        raise SourceServiceError(f"Tavily request failed: {exc}")
 
 
 # ============================================================
@@ -88,6 +82,7 @@ async def tavily_search(
     query: str,
     max_results: int = 5,
     include_domains: list[str] | None = None,
+    search_depth: str | None = None,
     include_answer: bool = False,
 ) -> dict:
 
@@ -96,29 +91,24 @@ async def tavily_search(
         "query": query,
 
         # BASIC is substantially cheaper/faster than ADVANCED.
-        "search_depth": os.getenv(
+        "search_depth": search_depth or os.getenv(
             "TAVILY_SEARCH_DEPTH",
             "basic",
         ),
 
-        "include_answer": bool(include_answer),
-        # Tavily expects a boolean here. Requesting raw page text gives the
-        # parser more evidence when the search snippet is too short.
-        "include_raw_content": True,
-        "chunks_per_source": 3,
-        "topic": "general",
-        "language": "en",
+        "include_answer": include_answer,
+        "include_raw_content": False,
 
-        # Return more independent results from the one paid search.
-        # Tavily documents 0..20 as the valid max_results range.
-        "max_results": min(max(1, int(max_results)), 20),
+        "max_results": min(
+            max_results,
+            10,
+        ),
     }
 
-    # Do not send include_domains here. Tavily's include_domains parameter is
-    # a restriction, whereas LandWise needs the whole web plus a short list
-    # of preferred portals. The caller puts the preferred domains into the
-    # natural-language query instead, so one search can return broader web
-    # evidence without silently excluding other sources.
+    if include_domains:
+        payload["include_domains"] = (
+            include_domains
+        )
 
     return await _post(
         TAVILY_SEARCH_URL,
@@ -392,123 +382,6 @@ async def collect_from_urls(
 
 
 # ============================================================
-# HISTORICAL SEARCH (ONE TAVILY CALL)
-# ============================================================
-
-async def search_historical_prices(location: str, years: list[int] | None = None) -> tuple[dict, list[dict]]:
-    """One Tavily search + free direct-page reads for historical evidence.
-
-    Tavily is used once. The seven requested portals are preferred, but the
-    search is not restricted to them, so other relevant public web evidence
-    can also surface. Direct HTTP reads of returned URLs do not consume Tavily
-    search credits.
-    """
-    from app.services.forecast_service import parse_historical_text
-    if not years:
-        current_year = datetime.now().year
-        years = list(range(current_year - 4, current_year))
-    year_text = ", ".join(str(y) for y in years)
-    domains = ["assetlyhq.com", "baanknet.com", "housing.com", "olx.in", "99acres.com", "instagram.com", "1acre.in"]
-    domain_text = ", ".join(domains)
-    query = (
-        f'"{location}" land plot price history for {year_text}. '
-        'Find actual dated land/plot listings, auction records, market reports, or published price evidence. '
-        'For each year, identify the year and either an explicit price per sq ft/sq yard or a total price together with land area. '
-        f'Prioritize these public sources when relevant: {domain_text}. Also search the wider public web. '
-        'Do not invent missing years; exclude flats, apartments, houses and rentals.'
-    )
-    response = await tavily_search(query, max_results=20, include_answer=False)
-    result_items = [r for r in response.get("results", []) if r.get("url")]
-
-    # Parse Tavily snippets/raw content first, then directly read returned pages
-    # where publicly accessible. Neither step creates another Tavily search.
-    candidates: list[tuple[str, str]] = []
-    answer = response.get("answer") or ""
-    
-    if answer:
-        candidates.append(
-            (
-                answer,
-                "",
-            )
-        )
-
-
-
-    for r in result_items:
-        url = r.get("url") or ""
-        text = " ".join([r.get("title") or "", r.get("content") or "", r.get("raw_content") or ""])
-        candidates.append((text, url))
-
-    async def read_result(r):
-        url = r.get("url") or ""
-        title, content = await fetch_url(url)
-        if not content:
-            return "", url
-        return f"{title}\n{content}", url
-
-    fetched = await asyncio.gather(*(read_result(r) for r in result_items[:20]), return_exceptions=False)
-    candidates.extend(fetched)
-
-    points = []
-    for text, url in candidates:
-        if not text:
-            continue
-
-        domain = (
-            urlparse(url)
-            .netloc
-            .lower()
-            .removeprefix("www.")
-            if url
-            else ""
-        )
-
-        try:
-            # First try structured historical tables.
-            parsed = parse_historical_text(
-                text,
-                location,
-                domain,
-                url,
-            )
-
-            # Then use the more flexible year -> price parser.
-            parsed.extend(
-                extract_year_price_pairs(
-                    text,
-                    location,
-                    domain,
-                    url,
-                )
-            )
-
-            points.extend(parsed)
-
-        except Exception:
-            continue
-
-    allowed = set(years)
-    unique = {}
-    for p in points:
-        if p.year not in allowed:
-            continue
-        # One source may expose several listings for a year; retain them so
-        # the yearly aggregation can use independent observations.
-        key = (p.year, round(p.price_per_sqft, 4), p.source_domain, p.source_url, p.evidence[:180])
-        unique[key] = p
-    historical = list(unique.values())
-
-    return {
-        "results": result_items[:20],
-        "answer": response.get("answer") or "",
-        "query": query,
-        "years": years,
-        "usage": response.get("usage", {}),
-    }, [p.__dict__ for p in historical]
-
-
-# ============================================================
 # NORMAL PROPERTY SEARCH
 # ============================================================
 
@@ -518,78 +391,250 @@ async def search_and_extract(
     bhk: str | None = None,
     property_status: str | None = None,
 ) -> tuple[dict, list[dict]]:
-    """One broad Tavily search for current comparable land evidence.
 
-    The seven requested domains are preferred, not exclusive. Returned URLs
-    are also fetched directly when publicly accessible to improve extraction.
-    """
-    p = property_type.replace("_", " ")
-    bhk_text = f" {bhk}" if bhk else ""
-    status_text = f" {property_status}" if property_status else ""
-    preferred = [
-        "assetlyhq.com", "baanknet.com", "housing.com", "olx.in",
-        "99acres.com", "instagram.com", "1acre.in",
-    ]
-    current_query = (
-        f'"{location}" current land plot sale asking price{bhk_text}{status_text}. '
-        'Find actual public listings with BOTH an explicit total price and explicit land area, '
-        'or an explicit price per sq ft/sq yard. Exclude flats, houses and rentals. '
-        f'Prioritize these sources when relevant: {", ".join(preferred)}. Also search the wider public web.'
+    p = property_type.replace(
+        "_",
+        " ",
     )
-    response = await tavily_search(current_query, max_results=20, include_answer=False)
-    selected = [x for x in response.get("results", []) if x.get("url")]
-    observations: list[dict] = []
 
-    async def process_result(item):
-        url = item.get("url", "")
-        title = item.get("title", "")
-        snippet = item.get("content") or item.get("snippet") or ""
-        raw_content = item.get("raw_content") or ""
-        combined = " ".join(x for x in (title, snippet, raw_content) if x)
-        out = []
+    bhk_text = (
+        f" {bhk}"
+        if bhk
+        else ""
+    )
+
+    status_text = (
+        f" {property_status}"
+        if property_status
+        else ""
+    )
+
+    # --------------------------------------------------------
+    # ONE primary query
+    # --------------------------------------------------------
+
+    primary_query = (
+        f"{p}{bhk_text}"
+        f"{status_text} "
+        f"{location} "
+        f"price area "
+        f"sq ft sq yard "
+        f"recent property listing"
+    )
+
+    preferred = [
+        "99acres.com",
+        "housing.com",
+        "1acre.in",
+        "magicbricks.com",
+        "nobroker.in",
+    ]
+
+    # --------------------------------------------------------
+    # PRIMARY SEARCH
+    # --------------------------------------------------------
+
+    response = await tavily_search(
+        primary_query,
+        max_results=5,
+        include_domains=preferred,
+    )
+
+    selected = []
+
+    for item in response.get(
+        "results",
+        [],
+    ):
+
+        if item.get("url"):
+            selected.append(item)
+
+    # --------------------------------------------------------
+    # Parse Tavily snippets FIRST.
+    # This often eliminates the need for Extract.
+    # --------------------------------------------------------
+
+    observations = []
+
+    for item in selected:
+
+        url = item.get("url")
+
+        title = (
+            item.get("title")
+            or ""
+        )
+
+        content = (
+            item.get("content")
+            or item.get("snippet")
+            or ""
+        )
+
+        if not content:
+            continue
+
         try:
-            out.extend(to_dict(x) for x in extract_observations(url, title, combined, property_type, bhk)[:20])
+
+            obs = extract_observations(
+                url,
+                title,
+                content,
+                property_type,
+                bhk,
+            )
+
+            observations.extend(
+                to_dict(x)
+                for x in obs[:5]
+            )
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
+    # FALLBACK:
+    # Only search again if the first query produced
+    # insufficient price+area evidence.
+    # --------------------------------------------------------
+
+    if len(observations) < 2:
+
+        fallback_query = (
+            f"{p}{bhk_text} "
+            f"{location} "
+            f"property asking price "
+            f"price per sq ft"
+        )
+
+        try:
+
+            fallback = await tavily_search(
+                fallback_query,
+                max_results=5,
+                include_domains=preferred,
+            )
+
+            for item in fallback.get(
+                "results",
+                [],
+            ):
+
+                url = item.get("url")
+
+                if not url:
+                    continue
+
+                if any(
+                    r.get("url") == url
+                    for r in selected
+                ):
+                    continue
+
+                selected.append(item)
+
+                content = (
+                    item.get("content")
+                    or item.get("snippet")
+                    or ""
+                )
+
+                try:
+
+                    obs = extract_observations(
+                        url,
+                        item.get("title", ""),
+                        content,
+                        property_type,
+                        bhk,
+                    )
+
+                    observations.extend(
+                        to_dict(x)
+                        for x in obs[:5]
+                    )
+
+                except Exception:
+                    continue
+
         except Exception:
             pass
-        fetched_title, fetched_content = await fetch_url(url)
-        if fetched_content:
-            try:
-                out.extend(to_dict(x) for x in extract_observations(url, fetched_title or title, fetched_content, property_type, bhk)[:20])
-            except Exception:
-                pass
 
-        # Location validation must use the whole returned result/page, not the
-        # short evidence window attached to an individual price-area pair.
-        # Otherwise valid listings are discarded when the locality appears in
-        # the title but not beside the numeric values.
-        full_text = " ".join(x for x in (title, snippet, raw_content, fetched_title, fetched_content) if x)
-        norm_full = "".join(ch.lower() for ch in full_text if ch.isalnum())
-        norm_loc = "".join(ch.lower() for ch in location if ch.isalnum())
-        tokens = [
-            "".join(ch.lower() for ch in token if ch.isalnum())
-            for token in location.replace(",", " ").split()
-            if len(token.strip()) >= 4
-        ]
-        score = 1.0 if norm_loc and norm_loc in norm_full else (0.9 if any(t and t in norm_full for t in tokens) else 0.35)
-        for row in out:
-            row["location_match"] = score
-        return out
+    # If the preferred property portals have no usable evidence for a small
+    # locality, make one Tavily-wide search instead of returning an empty price.
+    # This is still Tavily-only and the parser continues to require explicit
+    # price + area evidence before accepting an observation.
+    if len(observations) < 2:
+        broad_query=(
+            f"{p}{bhk_text} {location} land plot property price "
+            f"rate per sq ft sale listing"
+        )
+        try:
+            broad=await tavily_search(broad_query,max_results=8)
+            for item in broad.get("results",[]):
+                url=item.get("url")
+                if not url:
+                    continue
+                content=item.get("content") or item.get("snippet") or ""
+                if not content:
+                    continue
+                try:
+                    obs=extract_observations(url,item.get("title", ""),content,property_type,bhk)
+                    observations.extend(to_dict(x) for x in obs[:5])
+                    selected.append(item)
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
-    batches = await asyncio.gather(*(process_result(item) for item in selected[:20]), return_exceptions=False)
-    for batch in batches:
-        observations.extend(batch)
+    # --------------------------------------------------------
+    # DEDUPLICATE OBSERVATIONS
+    # --------------------------------------------------------
 
     unique = {}
+
     for observation in observations:
+
         key = (
-            observation.get("source_url"),
-            round(float(observation.get("price") or 0), 2),
-            round(float(observation.get("area") or 0), 3),
-            observation.get("area_unit"),
-            round(float(observation.get("canonical_price_per_sqft") or 0), 5),
+            observation.get(
+                "source_url"
+            ),
+            round(
+                float(
+                    observation.get(
+                        "price"
+                    )
+                    or 0
+                ),
+                2,
+            ),
+            round(
+                float(
+                    observation.get(
+                        "area"
+                    )
+                    or 0
+                ),
+                3,
+            ),
+            observation.get(
+                "area_unit"
+            ),
         )
+
         unique[key] = observation
-    return {"results": selected[:20], "query": current_query, "usage": response.get("usage", {})}, list(unique.values())[:200]
+
+    observations = list(
+        unique.values()
+    )[:40]
+
+    raw = {
+        "results": selected[:10],
+        "query": primary_query,
+    }
+
+    return raw, observations
 
 
 # ============================================================

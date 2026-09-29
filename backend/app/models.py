@@ -1,8 +1,69 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 PROPERTY_TYPES = ["land", "flat", "villa", "independent_house", "commercial"]
 LAND_UNITS = ["sq ft", "sq yd", "sq m", "acre", "hectare", "cent", "gunta", "marla", "bigha"]
+
+
+# ----------------------------------------------------------------------
+# Auth
+# ----------------------------------------------------------------------
+class SignupRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=80)
+    email: EmailStr
+    password: str = Field(..., min_length=6, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class VerifySignupRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
+class ResendOtpRequest(BaseModel):
+    email: EmailStr
+    purpose: str = Field("signup", pattern="^(signup|reset)$")
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6)
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+class OtpResponse(BaseModel):
+    message: str
+    email: EmailStr
+    expires_in_seconds: int = 600
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: "UserPublic"
+
+
+class UserPublic(BaseModel):
+    id: str
+    name: str
+    email: str
+    created_at: Optional[str] = None
+
+
+class SearchHistoryItem(BaseModel):
+    id: str
+    type: str
+    request: Dict[str, Any]
+    response: Dict[str, Any]
+    created_at: str
+
 
 class PropertyPriceRequest(BaseModel):
     property_type: str = Field("land")
@@ -59,7 +120,7 @@ class PriceInfo(BaseModel):
     property_type: str = "land"
     bhk: Optional[str] = None
     property_status: Optional[str] = None
-    price_per_unit: Optional[float] = None
+    price_per_unit: float
     unit: str
     currency: str
     estimated_total_price: Optional[float] = None
@@ -79,14 +140,10 @@ class PriceInfo(BaseModel):
     model_used: Optional[str] = None
     ml_metrics: Dict[str, Any] = Field(default_factory=dict)
     observations: List[Dict[str, Any]] = Field(default_factory=list)
-    historical_data: List[Dict[str, Any]] = Field(default_factory=list)
-    forecast: List[Dict[str, Any]] = Field(default_factory=list)
-    forecast_model: Optional[str] = None
-    forecast_trend: Optional[str] = None
-    historical_years: List[int] = Field(default_factory=list)
-    historical_cagr_percent: Optional[float] = None
-    historical_yoy_growth_percent: List[float] = Field(default_factory=list)
-    forecast_yoy_growth_percent: List[float] = Field(default_factory=list)
+    historical_prices: List[Dict[str, Any]] = Field(default_factory=list)
+    forecast_prices: List[Dict[str, Any]] = Field(default_factory=list)
+    historical_query: Optional[str] = None
+    historical_sources: List[str] = Field(default_factory=list)
 
 class AffordabilityOption(BaseModel):
     category: str

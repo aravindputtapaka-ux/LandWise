@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts"],"errors":true,"version":"5.8.3"}
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/vite-env.d.ts","./src/auth/AuthContext.tsx","./src/pages/Estimator.tsx","./src/pages/ForgotPassword.tsx","./src/pages/History.tsx","./src/pages/Landing.tsx","./src/pages/Login.tsx","./src/pages/Signup.tsx"],"errors":true,"version":"5.8.3"}

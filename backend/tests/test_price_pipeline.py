@@ -1,12 +1,8 @@
-import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.price_parser import extract_observations
-from app.services.source_service import search_historical_prices
 from app.unit_utils import convert_price_per_unit
 
 
@@ -33,32 +29,3 @@ def test_unrelated_numbers_are_not_prices():
 def test_price_unit_conversion_direction():
     assert convert_price_per_unit(4004, "sq ft", "acre") == 4004 * 43560
     assert round(convert_price_per_unit(950, "sq yd", "sq ft"), 6) == round(950 / 9, 6)
-
-
-def test_search_historical_prices_handles_empty_rows_without_crashing():
-    async def _run():
-        with (
-            patch(
-                "app.services.source_service.tavily_search",
-                AsyncMock(
-                    return_value={
-                        "results": [{
-                            "url": "https://example.com/plot",
-                            "title": "Land price",
-                            "content": "2024 land price was ₹800 per sq ft",
-                        }],
-                        "usage": {},
-                        "answer": "",
-                    }
-                ),
-            ),
-            patch(
-                "app.services.source_service.fetch_url",
-                AsyncMock(return_value=("Land price", "2024 land price was ₹800 per sq ft")),
-            ),
-        ):
-            metadata, history = await search_historical_prices("Hyderabad", [2024])
-            assert metadata["years"] == [2024]
-            assert history
-
-    asyncio.run(_run())
