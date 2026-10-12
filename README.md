@@ -1,8 +1,8 @@
-# 🏡 LandWise AI
+# 🏡 LandWise
 
 ### Evidence-first property price intelligence, affordability analysis, and AI-assisted property research
 
-LandWise AI is a full-stack real-estate research application that estimates property prices from publicly discoverable web evidence, analyzes affordability, visualizes historical land-price trends, and produces **five-year machine-learning forecasts**. Signed-in users can save their research and discuss individual results with a **Gemini-powered, retrieval-augmented (RAG) assistant**.
+LandWise is a full-stack real-estate research application that estimates property prices from publicly discoverable web evidence, analyzes affordability, visualizes historical land-price trends, and produces **five-year machine-learning forecasts**. Signed-in users can save their research and discuss individual results with a **Gemini-powered, retrieval-augmented (RAG) assistant**.
 
 > **What makes it different:** The current-price estimator uses validated property comparables rather than asking a language model to invent a valuation. **Tavily** supplies source discovery and extracted evidence; deterministic parsing and unit normalization support price estimates; **Bayesian Ridge** powers land-price forecasting; **Gemini** powers the separate, evidence-grounded chatbot.
 
@@ -347,4 +347,4 @@ No license was specified in the supplied project documentation. Add a `LICENSE` 
 
 ---
 
-**LandWise AI** — Research property prices with evidence, explore affordability, visualize trends, and revisit your findings with AI assistance.
+**LandWise** — Research property prices with evidence, explore affordability, visualize trends, and revisit your findings with AI assistance.
